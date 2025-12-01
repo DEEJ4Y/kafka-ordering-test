@@ -53,16 +53,32 @@ func main() {
 	}
 	logger.Println("Kafka is ready!")
 
+	// Delete existing topic to ensure clean state
+	logger.Printf("Deleting existing topic '%s' (if exists)...", topicName)
+	if err := deleteTopic(config); err != nil {
+		logger.Printf("Note: Could not delete topic (may not exist): %v", err)
+	} else {
+		logger.Println("Topic deleted successfully!")
+		// Wait for deletion to propagate
+		time.Sleep(3 * time.Second)
+	}
+
 	// Create topic with 3 partitions
 	logger.Printf("Creating topic '%s' with %d partitions...", topicName, numPartitions)
 	if err := createTopic(config); err != nil {
-		logger.Printf("Warning: Failed to create topic (may already exist): %v", err)
-	} else {
-		logger.Println("Topic created successfully!")
+		logger.Fatalf("Failed to create topic: %v", err)
 	}
+	logger.Println("Topic created successfully!")
 
-	// Wait a bit for topic to be ready
-	time.Sleep(2 * time.Second)
+	// Wait for topic to be fully ready
+	time.Sleep(5 * time.Second)
+
+	// Validate topic is empty before starting
+	logger.Println("Validating topic is empty...")
+	if err := validateTopicEmpty(config, logger); err != nil {
+		logger.Fatalf("Topic validation failed: %v", err)
+	}
+	logger.Println("✓ Topic is empty and ready for testing")
 
 	// Create verifier
 	verifier := NewOrderVerifier(results, logger)
@@ -274,6 +290,69 @@ func createTopic(config TestConfig) error {
 	err = admin.CreateTopic(config.TopicName, topicDetail, false)
 	if err != nil {
 		return fmt.Errorf("failed to create topic: %w", err)
+	}
+
+	return nil
+}
+
+// deleteTopic deletes a Kafka topic
+func deleteTopic(config TestConfig) error {
+	saramaConfig := sarama.NewConfig()
+	saramaConfig.Version = sarama.V2_6_0_0
+
+	admin, err := sarama.NewClusterAdmin(config.KafkaBrokers, saramaConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create cluster admin: %w", err)
+	}
+	defer admin.Close()
+
+	err = admin.DeleteTopic(config.TopicName)
+	if err != nil {
+		return fmt.Errorf("failed to delete topic: %w", err)
+	}
+
+	return nil
+}
+
+// validateTopicEmpty validates that the topic exists and has no messages
+func validateTopicEmpty(config TestConfig, logger *log.Logger) error {
+	saramaConfig := sarama.NewConfig()
+	saramaConfig.Version = sarama.V2_6_0_0
+
+	client, err := sarama.NewClient(config.KafkaBrokers, saramaConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+	defer client.Close()
+
+	// Get partitions for topic
+	partitions, err := client.Partitions(config.TopicName)
+	if err != nil {
+		return fmt.Errorf("failed to get partitions: %w", err)
+	}
+
+	logger.Printf("Checking %d partitions for existing messages...", len(partitions))
+
+	for _, partition := range partitions {
+		// Get newest offset (high water mark)
+		newestOffset, err := client.GetOffset(config.TopicName, partition, sarama.OffsetNewest)
+		if err != nil {
+			return fmt.Errorf("failed to get newest offset for partition %d: %w", partition, err)
+		}
+
+		// Get oldest offset
+		oldestOffset, err := client.GetOffset(config.TopicName, partition, sarama.OffsetOldest)
+		if err != nil {
+			return fmt.Errorf("failed to get oldest offset for partition %d: %w", partition, err)
+		}
+
+		messageCount := newestOffset - oldestOffset
+		logger.Printf("  Partition %d: oldest=%d, newest=%d, messages=%d",
+			partition, oldestOffset, newestOffset, messageCount)
+
+		if messageCount > 0 {
+			return fmt.Errorf("partition %d has %d existing messages (expected 0)", partition, messageCount)
+		}
 	}
 
 	return nil

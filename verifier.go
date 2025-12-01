@@ -77,7 +77,9 @@ func (v *OrderVerifier) VerifyMessage(msg ConsumedMessage) {
 			msg.Partition, receivedSeq, msg.Message.MessageID, msg.Offset, msg.ConsumerID)
 
 	} else if receivedSeq > expectedSeq {
-		// Gap detected - some messages were skipped (may arrive later)
+		// Gap detected - sequences jumped forward
+		// This is NOT an ordering violation - just means we skipped some sequences
+		// (Could be due to message loss, gaps in production, or offset management)
 		gap := Gap{
 			StartSequence: expectedSeq,
 			EndSequence:   receivedSeq - 1,
@@ -86,27 +88,41 @@ func (v *OrderVerifier) VerifyMessage(msg ConsumedMessage) {
 		stats.Gaps = append(stats.Gaps, gap)
 		stats.ExpectedSequence = receivedSeq + 1
 
-		v.logger.Printf("[VERIFY] Partition %d: ⚠️  GAP - Expected=%d, Received=%d, Gap=[%d-%d], MsgID=%s, Offset=%d, Consumer=%s",
+		v.logger.Printf("[VERIFY] Partition %d: ⚠️  GAP (NOT A VIOLATION) - Expected=%d, Received=%d, Gap=[%d-%d], MsgID=%s, Offset=%d, Consumer=%s",
 			msg.Partition, expectedSeq, receivedSeq, gap.StartSequence, gap.EndSequence, msg.Message.MessageID, msg.Offset, msg.ConsumerID)
+		v.logger.Printf("         Note: Gap means sequences jumped forward, which is OK (not an ordering violation)")
 
 	} else {
 		// receivedSeq < expectedSeq
-		// This is a TRUE ORDERING VIOLATION - sequence went backwards!
-		// This should NEVER happen with Kafka's ordering guarantees
-		// (unless there's a bug in the producer or Kafka itself)
-		violation := OrderingViolation{
-			Expected:   expectedSeq,
-			Received:   receivedSeq,
-			Offset:     msg.Offset,
-			Timestamp:  msg.ConsumedAt,
-			ConsumerID: msg.ConsumerID,
-			MessageID:  msg.Message.MessageID,
-		}
-		stats.OrderingViolations = append(stats.OrderingViolations, violation)
+		// This MIGHT be a TRUE ORDERING VIOLATION - sequence went backwards!
+		// BUT: If this is the first message we've seen (expectedSeq == 0), it's not a violation
+		//      It just means we're starting from a non-zero offset
 
-		v.logger.Printf("[VERIFY] Partition %d: ❌ ORDERING VIOLATION! - Expected=%d, Received=%d, MsgID=%s, Offset=%d, Consumer=%s",
-			msg.Partition, expectedSeq, receivedSeq, msg.Message.MessageID, msg.Offset, msg.ConsumerID)
-		v.logger.Printf("         This indicates sequence went BACKWARDS which should NEVER happen!")
+		if stats.MessagesReceived == 1 {
+			// First message in this partition - whatever sequence it has is fine
+			stats.ExpectedSequence = receivedSeq + 1
+			v.logger.Printf("[VERIFY] Partition %d: ✓ First message - Seq=%d (setting as baseline), MsgID=%s, Offset=%d, Consumer=%s",
+				msg.Partition, receivedSeq, msg.Message.MessageID, msg.Offset, msg.ConsumerID)
+		} else {
+			// This is a TRUE ORDERING VIOLATION - sequence went BACKWARDS!
+			// This should NEVER happen with Kafka's ordering guarantees
+			violation := OrderingViolation{
+				Expected:   expectedSeq,
+				Received:   receivedSeq,
+				Offset:     msg.Offset,
+				Timestamp:  msg.ConsumedAt,
+				ConsumerID: msg.ConsumerID,
+				MessageID:  msg.Message.MessageID,
+			}
+			stats.OrderingViolations = append(stats.OrderingViolations, violation)
+
+			v.logger.Printf("[VERIFY] Partition %d: ❌ TRUE ORDERING VIOLATION! - Expected=%d, Received=%d, MsgID=%s, Offset=%d, Consumer=%s",
+				msg.Partition, expectedSeq, receivedSeq, msg.Message.MessageID, msg.Offset, msg.ConsumerID)
+			v.logger.Printf("         CRITICAL: Sequence went BACKWARDS which violates Kafka's ordering guarantee!")
+
+			// Update expected to continue from this point
+			stats.ExpectedSequence = receivedSeq + 1
+		}
 	}
 }
 

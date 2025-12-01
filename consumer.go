@@ -199,8 +199,8 @@ func (h *consumerGroupHandler) Cleanup(session sarama.ConsumerGroupSession) erro
 
 // ConsumeClaim processes messages from a partition claim
 func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	h.consumer.logger.Printf("[%s] Started consuming partition %d from offset %d",
-		h.consumer.consumerID, claim.Partition(), claim.InitialOffset())
+	h.consumer.logger.Printf("[%s] ✓ VALIDATION: Started consuming partition %d from offset %d (HighWaterMark=%d)",
+		h.consumer.consumerID, claim.Partition(), claim.InitialOffset(), claim.HighWaterMarkOffset())
 
 	// Process messages
 	for {

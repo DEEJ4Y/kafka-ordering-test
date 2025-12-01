@@ -269,10 +269,12 @@ func (r *Reporter) GenerateMarkdownReport(filename string) error {
 			sb.WriteString("\n")
 		}
 
-		// Gaps details (sequences jumped forward - messages may arrive later)
+		// Gaps details (sequences jumped forward - NOT violations)
 		if len(stats.Gaps) > 0 {
-			sb.WriteString("\n#### ⚠️  Gaps (Sequences Jumped Forward)\n\n")
-			sb.WriteString("These are message sequences that were skipped. They may arrive later due to reprocessing.\n\n")
+			sb.WriteString("\n#### ⚠️  Gaps (Sequences Jumped Forward - NOT Violations)\n\n")
+			sb.WriteString("⚠️ **Note:** Gaps are NOT ordering violations! Kafka's ordering is still preserved.\n\n")
+			sb.WriteString("Gaps occur when sequence numbers jump forward (e.g., 5 → 10). This means ordering is maintained,\n")
+			sb.WriteString("but some sequences were not consumed (due to message loss, offset management, or test setup).\n\n")
 			sb.WriteString("| Gap Range | Missing Count | Detected At |\n")
 			sb.WriteString("|-----------|---------------|-------------|\n")
 			for _, gap := range stats.Gaps {
@@ -305,20 +307,34 @@ func (r *Reporter) GenerateMarkdownReport(filename string) error {
 	sb.WriteString("\n")
 
 	// Key Distinction Section
-	sb.WriteString("## Understanding: Ordering vs. Duplicates\n\n")
-	sb.WriteString("It's critical to understand the difference:\n\n")
-	sb.WriteString("### ❌ Ordering Violation (BAD - should never happen)\n")
-	sb.WriteString("- **Definition:** Sequence numbers go **backwards** (e.g., 5 → 4 → 3)\n")
+	sb.WriteString("## Understanding: Violations vs. Gaps vs. Duplicates\n\n")
+	sb.WriteString("It's critical to understand the differences between these three scenarios:\n\n")
+
+	sb.WriteString("### ❌ TRUE Ordering Violation (BAD - should NEVER happen)\n")
+	sb.WriteString("- **Definition:** Sequence numbers go **BACKWARDS** (e.g., 5 → 6 → 4)\n")
 	sb.WriteString("- **Kafka Guarantee:** This should **NEVER** happen within a partition\n")
-	sb.WriteString("- **What it means:** Kafka's ordering guarantee was broken\n")
-	sb.WriteString("- **Example:** Message with seq=10 arrives, then seq=5 arrives later\n\n")
+	sb.WriteString("- **What it means:** Kafka's ordering guarantee was broken (critical bug!)\n")
+	sb.WriteString("- **Example:** Consumer reads seq=10, then reads seq=5 (sequence went backwards)\n")
+	sb.WriteString("- **Detection:** `receivedSeq < expectedSeq` AND not the first message\n\n")
+
+	sb.WriteString("### ⚠️  Gap / Forward Jump (OK - not a violation)\n")
+	sb.WriteString("- **Definition:** Sequence numbers **JUMP FORWARD** (e.g., 5 → 10, skipping 6-9)\n")
+	sb.WriteString("- **Kafka Guarantee:** Ordering is NOT violated - sequences still increase\n")
+	sb.WriteString("- **What it means:** Some messages were not consumed (message loss, test setup, or offset management)\n")
+	sb.WriteString("- **Example:** Consumer reads seq=5, then reads seq=10 (skipped 6-9)\n")
+	sb.WriteString("- **Detection:** `receivedSeq > expectedSeq`\n")
+	sb.WriteString("- **Common causes:**\n")
+	sb.WriteString("  - Producer didn't send those sequences\n")
+	sb.WriteString("  - Consumer group offset was manually set or reset\n")
+	sb.WriteString("  - Messages expired or were compacted\n\n")
 
 	sb.WriteString("### 🔄 Duplicate Message (OK - expected with at-least-once)\n")
 	sb.WriteString("- **Definition:** Same sequence number processed **multiple times** (e.g., 5 → 6 → 5 → 7)\n")
 	sb.WriteString("- **Kafka Guarantee:** This is **expected** with at-least-once delivery\n")
 	sb.WriteString("- **What it means:** Message reprocessed after rebalance (before offset was committed)\n")
 	sb.WriteString("- **Example:** Consumer processed seq=5, rebalanced before commit, new consumer processes seq=5 again\n")
-	sb.WriteString("- **Solution:** Make your message handlers idempotent OR use manual commits\n\n")
+	sb.WriteString("- **Detection:** Same sequence number seen more than once\n")
+	sb.WriteString("- **Solution:** Make your message handlers idempotent OR use manual commits with exactly-once semantics\n\n")
 
 	// Calculate duplicates across all partitions
 	totalDuplicates := 0
@@ -571,7 +587,7 @@ func (r *Reporter) GenerateRawLog(filename string) error {
 		sb.WriteString(fmt.Sprintf("  Messages Received: %d\n", stats.MessagesReceived))
 		sb.WriteString(fmt.Sprintf("  Ordering Violations: %d\n", len(stats.OrderingViolations)))
 		sb.WriteString(fmt.Sprintf("  Gaps: %d\n", len(stats.Gaps)))
-		sb.WriteString(fmt.Sprintf("  Duplicates: %d\n", len(stats.Duplicates)))
+		sb.WriteString(fmt.Sprintf("  Duplicates: %d\n", len(stats.DuplicateMessages)))
 
 		if len(stats.OrderingViolations) > 0 {
 			sb.WriteString("  Violations:\n")
