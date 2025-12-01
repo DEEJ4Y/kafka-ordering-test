@@ -46,10 +46,20 @@ func NewConsumer(consumerID string, config TestConfig, logger *log.Logger, resul
 	saramaConfig.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRange()
 
 	// Session timeout: If consumer doesn't send heartbeat within this time, rebalance
-	saramaConfig.Consumer.Group.Session.Timeout = 10 * time.Second
+	// Use configured value or default to 10 seconds
+	sessionTimeout := config.SessionTimeout
+	if sessionTimeout == 0 {
+		sessionTimeout = 10 * time.Second
+	}
+	saramaConfig.Consumer.Group.Session.Timeout = sessionTimeout
 
 	// Heartbeat interval: How often to send heartbeats
-	saramaConfig.Consumer.Group.Heartbeat.Interval = 3 * time.Second
+	// Use configured value or default to 3 seconds
+	heartbeatInterval := config.HeartbeatInterval
+	if heartbeatInterval == 0 {
+		heartbeatInterval = 3 * time.Second
+	}
+	saramaConfig.Consumer.Group.Heartbeat.Interval = heartbeatInterval
 
 	// Rebalance timeout
 	saramaConfig.Consumer.Group.Rebalance.Timeout = 60 * time.Second
@@ -157,6 +167,23 @@ func (h *consumerGroupHandler) Cleanup(session sarama.ConsumerGroupSession) erro
 	h.consumer.logger.Printf("[%s] REBALANCE: CLEANUP - Revoking partitions: %v (Generation: %d)",
 		h.consumer.consumerID, partitions, session.GenerationID())
 
+	// Check for in-flight messages and mark them as interrupted
+	inFlight := h.consumer.results.GetInFlightMessages()
+	if len(inFlight) > 0 {
+		h.consumer.logger.Printf("[%s] REBALANCE: INTERRUPTION - %d messages were in-flight during rebalance",
+			h.consumer.consumerID, len(inFlight))
+
+		for _, msg := range inFlight {
+			// Only interrupt messages being processed by this consumer
+			if msg.ConsumerID == h.consumer.consumerID {
+				h.consumer.results.InterruptProcessing(msg.MessageID)
+				h.consumer.logger.Printf("[%s] INTERRUPTED: Partition=%d, Offset=%d, Seq=%d, MsgID=%s (was processing for %s)",
+					h.consumer.consumerID, msg.Partition, msg.Offset, msg.SequenceNum, msg.MessageID,
+					time.Since(msg.ProcessingStarted).Round(time.Millisecond))
+			}
+		}
+	}
+
 	// Record rebalance event
 	event := RebalanceEvent{
 		Timestamp:      time.Now(),
@@ -209,11 +236,79 @@ func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 			// Verify message ordering
 			h.consumer.verifier.VerifyMessage(consumedMsg)
 
-			// Mark message as processed
-			session.MarkMessage(message, "")
+			// === START PROCESSING SIMULATION ===
+			// Mark message as started processing
+			h.consumer.results.StartProcessing(
+				testMsg.MessageID,
+				message.Partition,
+				message.Offset,
+				testMsg.SequenceNum,
+				h.consumer.consumerID,
+			)
+
+			h.consumer.logger.Printf("[%s] PROCESSING START: Partition=%d, Offset=%d, Seq=%d, MsgID=%s",
+				h.consumer.consumerID, message.Partition, message.Offset,
+				testMsg.SequenceNum, testMsg.MessageID)
+
+			// Simulate realistic message processing with configurable delay
+			processingTime := h.consumer.calculateProcessingTime()
+
+			// Use a timer to simulate processing - this can be interrupted by rebalance
+			processingTimer := time.NewTimer(processingTime)
+
+			select {
+			case <-processingTimer.C:
+				// Processing completed normally
+				h.consumer.results.CompleteProcessing(testMsg.MessageID, h.consumer.consumerID)
+
+				h.consumer.logger.Printf("[%s] PROCESSING COMPLETE: Partition=%d, Offset=%d, Seq=%d, MsgID=%s (took %s)",
+					h.consumer.consumerID, message.Partition, message.Offset,
+					testMsg.SequenceNum, testMsg.MessageID, processingTime.Round(time.Millisecond))
+
+				// Mark message as processed (commit offset)
+				session.MarkMessage(message, "")
+
+			case <-session.Context().Done():
+				// Rebalance occurred during processing - message will be marked as interrupted in Cleanup
+				processingTimer.Stop()
+				h.consumer.logger.Printf("[%s] PROCESSING ABORTED: Partition=%d, Offset=%d, Seq=%d, MsgID=%s (rebalance triggered)",
+					h.consumer.consumerID, message.Partition, message.Offset,
+					testMsg.SequenceNum, testMsg.MessageID)
+				return nil
+			}
+			// === END PROCESSING SIMULATION ===
 
 		case <-session.Context().Done():
 			return nil
 		}
 	}
+}
+
+// calculateProcessingTime returns a processing time with jitter
+func (c *Consumer) calculateProcessingTime() time.Duration {
+	minTime := c.config.ProcessingTimeMin
+	maxTime := c.config.ProcessingTimeMax
+
+	// Default values if not configured
+	if minTime == 0 {
+		minTime = 50 * time.Millisecond
+	}
+	if maxTime == 0 {
+		maxTime = 200 * time.Millisecond
+	}
+
+	// For slow processing mode, use much longer times to trigger rebalances
+	if c.config.EnableSlowProcessing {
+		minTime = c.config.SessionTimeout + 1*time.Second
+		maxTime = c.config.SessionTimeout + 3*time.Second
+	}
+
+	// Random time between min and max
+	if maxTime <= minTime {
+		return minTime
+	}
+
+	// Simple randomization using current time
+	jitter := time.Duration(time.Now().UnixNano()%(maxTime-minTime).Nanoseconds() + minTime.Nanoseconds())
+	return jitter
 }

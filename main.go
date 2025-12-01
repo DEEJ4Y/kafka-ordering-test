@@ -30,12 +30,17 @@ func main() {
 
 	// Test configuration
 	config := TestConfig{
-		TopicName:     topicName,
-		NumPartitions: numPartitions,
-		NumMessages:   numMessages,
-		MessageDelay:  10 * time.Millisecond,
-		ConsumerGroup: consumerGroup,
-		KafkaBrokers:  []string{"localhost:9092"},
+		TopicName:          topicName,
+		NumPartitions:      numPartitions,
+		NumMessages:        numMessages,
+		MessageDelay:       10 * time.Millisecond,
+		ConsumerGroup:      consumerGroup,
+		KafkaBrokers:       []string{"localhost:9092"},
+		ProcessingTimeMin:  50 * time.Millisecond,  // Minimum processing time
+		ProcessingTimeMax:  200 * time.Millisecond, // Maximum processing time
+		SessionTimeout:     10 * time.Second,        // Consumer session timeout
+		HeartbeatInterval:  3 * time.Second,         // Heartbeat interval
+		EnableSlowProcessing: false,                 // Set to true to test slow processing causing rebalances
 	}
 
 	// Initialize test results
@@ -193,6 +198,14 @@ func main() {
 	logger.Printf("Messages received: %d", results.TotalMessagesRecv)
 	logger.Printf("Rebalance events: %d", len(results.RebalanceEvents))
 	logger.Printf("Ordering preserved within partitions: %v", results.OrderingPreserved)
+	logger.Println(strings.Repeat("-", 70))
+	logger.Printf("Messages processed: %d", results.ProcessingStats.TotalProcessed)
+	logger.Printf("Messages interrupted during rebalance: %d", results.ProcessingStats.TotalInterrupted)
+	logger.Printf("Messages reprocessed: %d", results.ProcessingStats.TotalReprocessed)
+	logger.Printf("Average processing time: %s", results.ProcessingStats.AverageProcessingTime.Round(time.Millisecond))
+	if results.ProcessingStats.AverageReprocessingDelay > 0 {
+		logger.Printf("Average reprocessing delay: %s", results.ProcessingStats.AverageReprocessingDelay.Round(time.Millisecond))
+	}
 	logger.Println(strings.Repeat("=", 70))
 	logger.Println("\nCheck RESULTS.md for detailed analysis!")
 }

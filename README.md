@@ -1,6 +1,6 @@
 # Kafka Ordering Test Bench
 
-A comprehensive Go-based test bench that demonstrates and proves Kafka's message ordering guarantees: **messages are ordered within partitions, but not across partitions**, even during consumer group rebalancing.
+A comprehensive Go-based test bench that demonstrates and proves Kafka's message ordering guarantees and processing safety: **messages are ordered within partitions (but not across partitions)**, and **message processing is safely interrupted and resumed during consumer rebalancing**.
 
 ## Overview
 
@@ -8,10 +8,13 @@ This test bench uses the Sarama Kafka library to:
 
 1. **Produce** sequentially numbered messages to 3 partitions
 2. **Consume** messages using a consumer group with dynamic scaling (2→3→4→2 consumers)
-3. **Trigger** multiple rebalancing events by adding/removing consumers
-4. **Verify** that message ordering is preserved within each partition
-5. **Demonstrate** that ordering is NOT guaranteed across partitions
-6. **Generate** detailed reports with statistics and visualizations
+3. **Simulate** realistic message processing with configurable delays (50-200ms)
+4. **Trigger** multiple rebalancing events by adding/removing consumers
+5. **Verify** that message ordering is preserved within each partition
+6. **Track** message processing lifecycle: started, interrupted, completed, reprocessed
+7. **Detect** when messages are interrupted during rebalancing
+8. **Demonstrate** that interrupted messages are safely reprocessed
+9. **Generate** detailed reports with statistics, processing analysis, and visualizations
 
 ## Architecture
 
@@ -40,8 +43,63 @@ This test bench uses the Sarama Kafka library to:
                                   │  • Tracks sequences        │
                                   │  • Detects violations      │
                                   │  • Logs rebalances         │
+                                  │  • Tracks processing       │
                                   └────────────────────────────┘
 ```
+
+## Key Features
+
+### 1. Message Processing Simulation
+
+The test simulates realistic message processing to demonstrate what happens during rebalancing:
+
+- **Configurable Processing Time**: Each message takes 50-200ms to "process" (simulated with delays)
+- **Processing Lifecycle Tracking**: Every message state is tracked:
+  - `STARTED` - Processing began
+  - `COMPLETED` - Processing finished successfully
+  - `INTERRUPTED` - Rebalance occurred during processing
+- **Random Jitter**: Processing times vary to simulate real-world scenarios
+
+### 2. Rebalance Interruption Detection
+
+The test detects and logs when rebalancing interrupts message processing:
+
+- Identifies messages that were "in-flight" when rebalance started
+- Tracks which consumer was processing the message
+- Measures how long the message was being processed before interruption
+- Records all interrupted messages for analysis
+
+### 3. Message Reprocessing Verification
+
+After a rebalance, the test verifies that interrupted messages are safely reprocessed:
+
+- Tracks when interrupted messages are picked up by the new partition owner
+- Measures the delay between interruption and reprocessing
+- Detects duplicate processing attempts
+- Ensures no message loss during rebalancing
+
+### 4. Configurable Session Timeouts
+
+The test allows configuring consumer session timeouts and processing times:
+
+- **Fast Processing Mode** (default): 50-200ms processing, 10s session timeout
+  - Most messages complete before rebalance
+  - Few interruptions expected
+
+- **Slow Processing Mode** (`EnableSlowProcessing = true`):
+  - Processing time > session timeout
+  - Forces processing to be interrupted
+  - Demonstrates rebalance behavior with slow consumers
+
+### 5. Enhanced Reporting
+
+The generated RESULTS.md report includes:
+
+- **Processing Statistics**: Total processed, interrupted, reprocessed messages
+- **Interruption Details**: Table of all interrupted messages with timing
+- **Reprocessing Analysis**: Which messages were reprocessed and by whom
+- **Processing Timeline**: Visual timeline showing rebalances and interruptions
+- **Average Delays**: Processing time and reprocessing delay averages
 
 ## Prerequisites
 
@@ -192,31 +250,48 @@ The generated report includes:
    - Which consumer got which partitions
    - Timestamps for correlation
 
-4. **Per-Partition Statistics**
+4. **Message Processing During Rebalance** ⭐ NEW
+   - Processing configuration (timeouts, delays)
+   - Processing statistics (processed, interrupted, reprocessed)
+   - Table of interrupted messages with timing details
+   - Reprocessing analysis showing recovery
+   - Visual timeline of processing and interruptions
+
+5. **Per-Partition Statistics**
    - Messages received per partition
    - Any ordering violations (should be ZERO)
    - Gaps or duplicates detected
    - First and last message details
 
-5. **Message Flow Visualization**
+6. **Message Flow Visualization**
    - ASCII chart showing consumption pattern
 
-6. **Cross-Partition Ordering Analysis**
+7. **Cross-Partition Ordering Analysis**
    - Demonstrates lack of global ordering
    - Shows message interleaving across partitions
 
-7. **Conclusions**
+8. **Conclusions**
    - Summary of what the test proves
    - Kafka ordering guarantees explained
+   - Processing safety during rebalancing
 
 ### Expected Results
 
 **✅ Success Criteria:**
+
+*Ordering:*
 - ✅ Ordering preserved within partitions: **YES**
 - ✅ Zero ordering violations per partition
 - ✅ Messages consumed in sequence: 0, 1, 2, 3... within each partition
 - ✅ Multiple rebalance events occurred without affecting ordering
 - ✅ Cross-partition messages are interleaved (expected behavior)
+
+*Processing Safety:*
+- ✅ Messages interrupted during rebalancing (shows detection works)
+- ✅ All interrupted messages successfully reprocessed
+- ✅ No message loss during rebalancing
+- ✅ Reprocessing delay measured and reported
+- ✅ At-least-once delivery guaranteed
 
 **❌ Failure Indicators:**
 - ❌ Ordering violations within any partition
@@ -259,6 +334,35 @@ Consumer group rebalancing:
 - Partition reassignments visible
 - Ordering still preserved after rebalances
 
+### 4. Message Processing Safety During Rebalancing ⭐ NEW
+
+When a rebalance occurs, Kafka safely handles messages that are being processed:
+
+**What Happens:**
+1. **Rebalance Triggered**: New consumer joins/leaves the group
+2. **Processing Interrupted**: Consumer's session context is cancelled
+3. **Cleanup Called**: Consumer releases partitions, marks in-flight messages
+4. **Partition Reassigned**: Another consumer takes ownership
+5. **Message Reprocessed**: New owner processes the uncommitted message
+
+**Guarantees:**
+- ✅ **No Message Loss**: Interrupted messages are reprocessed by new owner
+- ✅ **At-Least-Once Delivery**: Messages may be processed multiple times
+- ✅ **Processing Detection**: Test tracks which messages were interrupted
+- ✅ **Reprocessing Tracking**: Measures delay and verifies completion
+
+**Evidence:**
+- Interrupted messages logged with timing details
+- Same messages reprocessed by different consumers
+- Reprocessing delay measured (typically < 1 second)
+- All interrupted messages eventually complete
+
+**Real-World Implications:**
+- Your message handlers must be **idempotent** (safe to run multiple times)
+- Use manual offset commits for exactly-once semantics if needed
+- Consider processing time relative to session timeout
+- Monitor reprocessing delays in production
+
 ## Customization
 
 You can modify the test parameters in `main.go`:
@@ -272,8 +376,26 @@ const (
 )
 
 // In TestConfig:
-MessageDelay: 10 * time.Millisecond,  // Delay between messages
+config := TestConfig{
+    MessageDelay:       10 * time.Millisecond,   // Delay between messages
+    ProcessingTimeMin:  50 * time.Millisecond,   // Min processing time
+    ProcessingTimeMax:  200 * time.Millisecond,  // Max processing time
+    SessionTimeout:     10 * time.Second,         // Consumer session timeout
+    HeartbeatInterval:  3 * time.Second,          // Heartbeat interval
+    EnableSlowProcessing: false,                  // Force slow processing
+}
 ```
+
+### Testing Slow Processing
+
+To test what happens when processing takes longer than the session timeout:
+
+```go
+// In main.go TestConfig:
+EnableSlowProcessing: true,  // Processing time will exceed session timeout
+```
+
+This will cause most messages to be interrupted during processing, demonstrating rebalancing behavior with slow consumers.
 
 ## Cleanup
 
@@ -323,10 +445,10 @@ docker-compose up -d
 kafka-ordering-test/
 ├── main.go              # Orchestrator - runs the entire test
 ├── producer.go          # Message producer with partition distribution
-├── consumer.go          # Consumer with rebalance handling
+├── consumer.go          # Consumer with rebalance & processing simulation
 ├── verifier.go          # Order verification logic
 ├── reporter.go          # Report generation (markdown & logs)
-├── types.go             # Data structures and types
+├── types.go             # Data structures (messages, processing state, stats)
 ├── docker-compose.yml   # Kafka & Zookeeper setup
 ├── go.mod              # Go module definition
 ├── go.sum              # Go dependencies
@@ -365,6 +487,26 @@ Rebalances are detected via Sarama's ConsumerGroupHandler:
 - `Cleanup()` - called when partitions revoked
 
 Both events are logged with timestamps and partition details.
+
+### Processing Lifecycle Tracking
+
+Each message goes through a tracked processing lifecycle:
+
+1. **Consumed**: Message received from Kafka
+2. **Processing Started**: `results.StartProcessing()` called, state = `STARTED`
+3. **Processing Simulation**: Sleep for random duration (50-200ms)
+4. **Completion Path:**
+   - **Normal**: Processing completes, state = `COMPLETED`, offset committed
+   - **Interrupted**: Rebalance occurs, state = `INTERRUPTED`, offset NOT committed
+5. **Reprocessing**: Interrupted message picked up by new owner
+   - Tracked as a reprocessing attempt
+   - State updated to `COMPLETED` when done
+
+**Key Implementation Details:**
+- Processing uses `time.NewTimer()` with `select` to detect interruptions
+- `session.Context().Done()` signals rebalance during processing
+- `Cleanup()` marks all in-flight messages as interrupted
+- Auto-commit interval (1s) determines which messages need reprocessing
 
 ## Advanced Usage
 

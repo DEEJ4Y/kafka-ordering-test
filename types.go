@@ -60,14 +60,59 @@ type Gap struct {
 	Timestamp     time.Time
 }
 
+// ProcessingState represents the state of message processing
+type ProcessingState string
+
+const (
+	ProcessingStarted     ProcessingState = "STARTED"
+	ProcessingCompleted   ProcessingState = "COMPLETED"
+	ProcessingInterrupted ProcessingState = "INTERRUPTED"
+)
+
+// MessageProcessingInfo tracks the processing lifecycle of a message
+type MessageProcessingInfo struct {
+	MessageID         string
+	Partition         int32
+	Offset            int64
+	SequenceNum       int
+	ConsumerID        string
+	State             ProcessingState
+	ProcessingStarted time.Time
+	ProcessingEnded   time.Time
+	ProcessingDuration time.Duration
+	Interrupted       bool
+	ReprocessedBy     string    // Consumer ID that reprocessed after interruption
+	ReprocessedAt     time.Time
+	ProcessingAttempts int
+	InterruptedDuringRebalance bool
+}
+
+// ProcessingStats tracks message processing statistics
+type ProcessingStats struct {
+	TotalProcessed           int
+	TotalInterrupted         int
+	TotalReprocessed         int
+	InterruptedMessages      []*MessageProcessingInfo
+	ReprocessedMessages      []*MessageProcessingInfo
+	DuplicateProcessing      []*MessageProcessingInfo
+	AverageProcessingTime    time.Duration
+	AverageReprocessingDelay time.Duration
+	mu                       sync.RWMutex
+}
+
 // TestConfig holds the test configuration
 type TestConfig struct {
-	TopicName        string
-	NumPartitions    int
-	NumMessages      int
-	MessageDelay     time.Duration
-	ConsumerGroup    string
-	KafkaBrokers     []string
+	TopicName              string
+	NumPartitions          int
+	NumMessages            int
+	MessageDelay           time.Duration
+	ConsumerGroup          string
+	KafkaBrokers           []string
+	ProcessingTimeMin      time.Duration // Minimum processing time per message
+	ProcessingTimeMax      time.Duration // Maximum processing time per message
+	SessionTimeout         time.Duration // Consumer session timeout
+	HeartbeatInterval      time.Duration // Consumer heartbeat interval
+	EnableSlowProcessing   bool          // Enable slow processing mode to trigger rebalances
 }
 
 // TestResults aggregates all test results
@@ -75,6 +120,8 @@ type TestResults struct {
 	Config            TestConfig
 	PartitionStats    map[int32]*PartitionStats
 	RebalanceEvents   []RebalanceEvent
+	ProcessingStats   *ProcessingStats
+	ProcessingInfo    map[string]*MessageProcessingInfo // Key: MessageID
 	StartTime         time.Time
 	EndTime           time.Time
 	TotalMessagesSent int
@@ -89,7 +136,13 @@ func NewTestResults(config TestConfig) *TestResults {
 		Config:          config,
 		PartitionStats:  make(map[int32]*PartitionStats),
 		RebalanceEvents: make([]RebalanceEvent, 0),
-		StartTime:       time.Now(),
+		ProcessingStats: &ProcessingStats{
+			InterruptedMessages: make([]*MessageProcessingInfo, 0),
+			ReprocessedMessages: make([]*MessageProcessingInfo, 0),
+			DuplicateProcessing: make([]*MessageProcessingInfo, 0),
+		},
+		ProcessingInfo: make(map[string]*MessageProcessingInfo),
+		StartTime:      time.Now(),
 	}
 }
 
@@ -114,4 +167,113 @@ func (tr *TestResults) AddRebalanceEvent(event RebalanceEvent) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	tr.RebalanceEvents = append(tr.RebalanceEvents, event)
+}
+
+// StartProcessing marks a message as started processing
+func (tr *TestResults) StartProcessing(msgID string, partition int32, offset int64, seqNum int, consumerID string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+
+	if existing, exists := tr.ProcessingInfo[msgID]; exists {
+		// This is a reprocessing attempt
+		existing.ProcessingAttempts++
+		existing.ReprocessedBy = consumerID
+		existing.ReprocessedAt = time.Now()
+		existing.State = ProcessingStarted
+		existing.ProcessingStarted = time.Now()
+	} else {
+		// First time processing
+		tr.ProcessingInfo[msgID] = &MessageProcessingInfo{
+			MessageID:         msgID,
+			Partition:         partition,
+			Offset:            offset,
+			SequenceNum:       seqNum,
+			ConsumerID:        consumerID,
+			State:             ProcessingStarted,
+			ProcessingStarted: time.Now(),
+			ProcessingAttempts: 1,
+		}
+	}
+}
+
+// CompleteProcessing marks a message as completed processing
+func (tr *TestResults) CompleteProcessing(msgID string, consumerID string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+
+	if info, exists := tr.ProcessingInfo[msgID]; exists {
+		info.State = ProcessingCompleted
+		info.ProcessingEnded = time.Now()
+		info.ProcessingDuration = info.ProcessingEnded.Sub(info.ProcessingStarted)
+
+		// Update stats
+		tr.ProcessingStats.mu.Lock()
+		tr.ProcessingStats.TotalProcessed++
+
+		if info.Interrupted {
+			tr.ProcessingStats.TotalReprocessed++
+			tr.ProcessingStats.ReprocessedMessages = append(tr.ProcessingStats.ReprocessedMessages, info)
+
+			// Calculate reprocessing delay
+			if !info.ReprocessedAt.IsZero() && !info.ProcessingStarted.IsZero() {
+				delay := info.ReprocessedAt.Sub(info.ProcessingStarted)
+				if tr.ProcessingStats.AverageReprocessingDelay == 0 {
+					tr.ProcessingStats.AverageReprocessingDelay = delay
+				} else {
+					// Running average
+					count := len(tr.ProcessingStats.ReprocessedMessages)
+					tr.ProcessingStats.AverageReprocessingDelay =
+						(tr.ProcessingStats.AverageReprocessingDelay*time.Duration(count-1) + delay) / time.Duration(count)
+				}
+			}
+		}
+
+		if info.ProcessingAttempts > 1 {
+			tr.ProcessingStats.DuplicateProcessing = append(tr.ProcessingStats.DuplicateProcessing, info)
+		}
+
+		// Update average processing time
+		if tr.ProcessingStats.AverageProcessingTime == 0 {
+			tr.ProcessingStats.AverageProcessingTime = info.ProcessingDuration
+		} else {
+			count := tr.ProcessingStats.TotalProcessed
+			tr.ProcessingStats.AverageProcessingTime =
+				(tr.ProcessingStats.AverageProcessingTime*time.Duration(count-1) + info.ProcessingDuration) / time.Duration(count)
+		}
+
+		tr.ProcessingStats.mu.Unlock()
+	}
+}
+
+// InterruptProcessing marks a message as interrupted during rebalance
+func (tr *TestResults) InterruptProcessing(msgID string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+
+	if info, exists := tr.ProcessingInfo[msgID]; exists {
+		if info.State == ProcessingStarted {
+			info.State = ProcessingInterrupted
+			info.Interrupted = true
+			info.InterruptedDuringRebalance = true
+
+			tr.ProcessingStats.mu.Lock()
+			tr.ProcessingStats.TotalInterrupted++
+			tr.ProcessingStats.InterruptedMessages = append(tr.ProcessingStats.InterruptedMessages, info)
+			tr.ProcessingStats.mu.Unlock()
+		}
+	}
+}
+
+// GetInFlightMessages returns all messages currently being processed
+func (tr *TestResults) GetInFlightMessages() []*MessageProcessingInfo {
+	tr.mu.RLock()
+	defer tr.mu.RUnlock()
+
+	inFlight := make([]*MessageProcessingInfo, 0)
+	for _, info := range tr.ProcessingInfo {
+		if info.State == ProcessingStarted {
+			inFlight = append(inFlight, info)
+		}
+	}
+	return inFlight
 }
