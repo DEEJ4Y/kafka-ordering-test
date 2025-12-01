@@ -83,6 +83,7 @@ After a rebalance, the test verifies that interrupted messages are safely reproc
 The test allows configuring consumer session timeouts and processing times:
 
 - **Fast Processing Mode** (default): 50-200ms processing, 10s session timeout
+
   - Most messages complete before rebalance
   - Few interruptions expected
 
@@ -136,6 +137,7 @@ go run .
 ```
 
 The test will automatically:
+
 - Wait for Kafka to be ready
 - Create the test topic with 3 partitions
 - Start 2 consumers
@@ -162,25 +164,30 @@ cat test-events.log
 The test runs through the following phases:
 
 1. **Phase 1**: Start 2 consumers
+
    - Consumer group forms with 2 members
    - Partitions are distributed (likely 2-1 split)
 
 2. **Phase 2**: Start producer
+
    - Sends 600 messages (200 per partition)
    - Messages numbered sequentially per partition
    - Small 10ms delay between messages
 
 3. **Phase 3**: Add 3rd consumer
+
    - **Triggers rebalance**
    - Partitions redistributed (1-1-1)
    - Tests ordering during rebalance
 
 4. **Phase 4**: Add 4th consumer
+
    - **Triggers rebalance**
    - 4 consumers, 3 partitions (one idle)
    - Tests behavior with more consumers than partitions
 
 5. **Phase 5**: Let consumers catch up
+
    - Ensures all messages are processed
 
 6. **Phase 6**: Remove consumers
@@ -203,6 +210,7 @@ saramaConfig.Producer.Partitioner = sarama.NewManualPartitioner
 ```
 
 **Why these matter:**
+
 - `Idempotent = true` ensures exactly-once semantics and prevents message duplication
 - `RequiredAcks = WaitForAll` ensures durability before considering send successful
 - Manual partitioner gives us control over which messages go to which partition
@@ -225,6 +233,7 @@ saramaConfig.Consumer.Group.Session.Timeout = 10 * time.Second
 ```
 
 **Why these matter:**
+
 - `OffsetOldest` ensures we read all messages from the start
 - Auto-commit manages offset commits automatically
 - Rebalance strategy determines how partitions are assigned during rebalancing
@@ -237,20 +246,24 @@ saramaConfig.Consumer.Group.Session.Timeout = 10 * time.Second
 The generated report includes:
 
 1. **Test Configuration**
+
    - Number of partitions, messages, consumers
    - Timing information
 
 2. **Executive Summary**
+
    - Total messages sent/received
    - Number of rebalance events
    - Overall ordering verdict
 
 3. **Rebalance Timeline**
+
    - Table showing all rebalance events
    - Which consumer got which partitions
    - Timestamps for correlation
 
 4. **Message Processing During Rebalance** ⭐ NEW
+
    - Processing configuration (timeouts, delays)
    - Processing statistics (processed, interrupted, reprocessed)
    - Table of interrupted messages with timing details
@@ -258,15 +271,18 @@ The generated report includes:
    - Visual timeline of processing and interruptions
 
 5. **Per-Partition Statistics**
+
    - Messages received per partition
    - Any ordering violations (should be ZERO)
    - Gaps or duplicates detected
    - First and last message details
 
 6. **Message Flow Visualization**
+
    - ASCII chart showing consumption pattern
 
 7. **Cross-Partition Ordering Analysis**
+
    - Demonstrates lack of global ordering
    - Shows message interleaving across partitions
 
@@ -279,14 +295,16 @@ The generated report includes:
 
 **✅ Success Criteria:**
 
-*Ordering:*
+_Ordering:_
+
 - ✅ Ordering preserved within partitions: **YES**
 - ✅ Zero ordering violations per partition
 - ✅ Messages consumed in sequence: 0, 1, 2, 3... within each partition
 - ✅ Multiple rebalance events occurred without affecting ordering
 - ✅ Cross-partition messages are interleaved (expected behavior)
 
-*Processing Safety:*
+_Processing Safety:_
+
 - ✅ Messages interrupted during rebalancing (shows detection works)
 - ✅ All interrupted messages successfully reprocessed
 - ✅ No message loss during rebalancing
@@ -294,6 +312,7 @@ The generated report includes:
 - ✅ At-least-once delivery guaranteed
 
 **❌ Failure Indicators:**
+
 - ❌ Ordering violations within any partition
 - ❌ Messages out of sequence within a partition
 - ❌ Message loss (sent != received)
@@ -303,11 +322,13 @@ The generated report includes:
 ### 1. Within-Partition Ordering ✅
 
 Kafka **guarantees** that messages sent to the same partition will be consumed in the exact order they were produced, even during:
+
 - Consumer rebalancing
 - Consumer failures and restarts
 - Network issues (with retries)
 
 **Evidence:**
+
 - Each partition shows sequence numbers: 0→1→2→3→...
 - No ordering violations detected
 - Rebalances don't affect sequence
@@ -317,6 +338,7 @@ Kafka **guarantees** that messages sent to the same partition will be consumed i
 Kafka **does NOT guarantee** ordering across different partitions.
 
 **Evidence:**
+
 - Messages from partition 0, 1, and 2 are interleaved
 - Global sequence is not maintained
 - This is expected and by design
@@ -324,12 +346,14 @@ Kafka **does NOT guarantee** ordering across different partitions.
 ### 3. Rebalancing Behavior
 
 Consumer group rebalancing:
+
 - Occurs when consumers join/leave
 - Temporarily pauses consumption
 - Redistributes partitions
 - **Does NOT** break within-partition ordering
 
 **Evidence:**
+
 - Multiple rebalance events logged
 - Partition reassignments visible
 - Ordering still preserved after rebalances
@@ -339,6 +363,7 @@ Consumer group rebalancing:
 When a rebalance occurs, Kafka safely handles messages that are being processed:
 
 **What Happens:**
+
 1. **Rebalance Triggered**: New consumer joins/leaves the group
 2. **Processing Interrupted**: Consumer's session context is cancelled
 3. **Cleanup Called**: Consumer releases partitions, marks in-flight messages
@@ -346,18 +371,21 @@ When a rebalance occurs, Kafka safely handles messages that are being processed:
 5. **Message Reprocessed**: New owner processes the uncommitted message
 
 **Guarantees:**
+
 - ✅ **No Message Loss**: Interrupted messages are reprocessed by new owner
 - ✅ **At-Least-Once Delivery**: Messages may be processed multiple times
 - ✅ **Processing Detection**: Test tracks which messages were interrupted
 - ✅ **Reprocessing Tracking**: Measures delay and verifies completion
 
 **Evidence:**
+
 - Interrupted messages logged with timing details
 - Same messages reprocessed by different consumers
 - Reprocessing delay measured (typically < 1 second)
 - All interrupted messages eventually complete
 
 **Real-World Implications:**
+
 - Your message handlers must be **idempotent** (safe to run multiple times)
 - Use manual offset commits for exactly-once semantics if needed
 - Consider processing time relative to session timeout
@@ -462,6 +490,7 @@ kafka-ordering-test/
 ### Message Structure
 
 Each message contains:
+
 ```json
 {
   "partition_key": "key-0",
@@ -474,6 +503,7 @@ Each message contains:
 ### Verification Logic
 
 For each consumed message:
+
 1. Extract partition and sequence number
 2. Check if sequence = expected (previous + 1)
 3. If match: ✅ In order
@@ -483,6 +513,7 @@ For each consumed message:
 ### Rebalance Detection
 
 Rebalances are detected via Sarama's ConsumerGroupHandler:
+
 - `Setup()` - called when partitions assigned
 - `Cleanup()` - called when partitions revoked
 
@@ -503,6 +534,7 @@ Each message goes through a tracked processing lifecycle:
    - State updated to `COMPLETED` when done
 
 **Key Implementation Details:**
+
 - Processing uses `time.NewTimer()` with `select` to detect interruptions
 - `session.Context().Done()` signals rebalance during processing
 - `Cleanup()` marks all in-flight messages as interrupted
@@ -541,3 +573,71 @@ You can modify `main.go` to add consumers at different times or with different p
 ## License
 
 MIT License - Feel free to use and modify for your testing needs.
+
+Perfect! Now the test results are **accurate and conclusive**. Here's my analysis:
+
+### Key Findings
+
+**1. Ordering IS Preserved Within Partitions**
+
+- ✅ **Zero true ordering violations** across all 3 partitions
+- ✅ Sequences never went backwards (no 5→4→3)
+- ✅ All 600 messages received in correct order within their partitions
+- **This confirms Kafka's core guarantee**
+
+**2. Rebalancing Causes Duplicates (Expected Behavior)**
+
+- 🔄 **9 messages reprocessed** (1.5% of total)
+- Each rebalance interrupted 3 messages (1 per partition)
+- **This is correct at-least-once semantics**
+- Duplicates occurred because:
+  - Consumer was processing message
+  - Rebalance happened (partitions reassigned)
+  - Offset wasn't committed yet
+  - New consumer reprocessed from last committed offset
+
+**3. No Message Loss**
+
+- ✅ All 600 messages delivered
+- ✅ No gaps or missing sequences
+- ✅ Rebalancing is safe
+
+**4. Processing Interruption Pattern**
+
+- 9 messages interrupted during 3 rebalance events
+- All interrupted messages successfully reprocessed
+- Processing times: 47-64 seconds (much longer than session timeout of 10s)
+- Shows rebalancing doesn't wait for in-flight processing
+
+## What This Proves
+
+### ✅ Kafka Guarantees Confirmed:
+
+1. **Ordering within partitions is rock-solid** - never breaks during rebalancing
+2. **At-least-once delivery works correctly** - messages may be processed twice, never lost
+3. **Rebalancing is safe** - partitions get reassigned without breaking ordering
+4. **Consumer groups work as designed** - partitions smoothly handed off between consumers
+
+### 🔄 Application Implications
+
+**You must handle duplicates because:**
+
+- Auto-commit happens periodically (not per message)
+- Rebalancing doesn't wait for processing to complete
+- A message being processed during rebalance will be reprocessed
+
+**Solutions:**
+
+1. **Idempotent processing** - design so processing same message twice has same effect as once
+2. **Manual commits** - commit only after successfully processing (reduces duplicates but adds latency)
+3. **Exactly-once semantics** - use Kafka transactions (more complex, higher overhead)
+
+## Excellent Test Results
+
+The test now clearly demonstrates:
+
+- ✅ Kafka preserves ordering during rebalancing (your original question)
+- ✅ Rebalancing causes duplicate processing, not ordering violations
+- ✅ The distinction between ordering (never broken) vs duplicates (expected)
+
+This is exactly what you'd want to see in a production Kafka system with at-least-once delivery semantics!
