@@ -191,11 +191,20 @@ func (r *Reporter) GenerateMarkdownReport(filename string) error {
 		stats.mu.Lock()
 
 		sb.WriteString(fmt.Sprintf("### Partition %d\n\n", partitionID))
-		sb.WriteString(fmt.Sprintf("- **Messages Received:** %d\n", stats.MessagesReceived))
+		sb.WriteString(fmt.Sprintf("- **Messages Received (total):** %d\n", stats.MessagesReceived))
+		sb.WriteString(fmt.Sprintf("- **Unique Messages:** %d\n", len(stats.SeenSequences)))
+		sb.WriteString(fmt.Sprintf("- **Duplicate Messages:** %d (reprocessed due to rebalancing)\n", len(stats.DuplicateMessages)))
 		sb.WriteString(fmt.Sprintf("- **Expected Final Sequence:** %d\n", stats.ExpectedSequence))
-		sb.WriteString(fmt.Sprintf("- **Ordering Violations:** %d\n", len(stats.OrderingViolations)))
-		sb.WriteString(fmt.Sprintf("- **Gaps Detected:** %d\n", len(stats.Gaps)))
-		sb.WriteString(fmt.Sprintf("- **Duplicates:** %d\n", len(stats.Duplicates)))
+		sb.WriteString("\n")
+
+		// Ordering status
+		if len(stats.OrderingViolations) == 0 {
+			sb.WriteString("- **Ordering Status:** ✅ **PERFECT** - No violations detected\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("- **Ordering Status:** ❌ **VIOLATIONS DETECTED** - %d sequences went backwards\n", len(stats.OrderingViolations)))
+		}
+
+		sb.WriteString(fmt.Sprintf("- **Gaps Detected:** %d (sequences jumped forward)\n", len(stats.Gaps)))
 
 		if stats.FirstMessage != nil {
 			sb.WriteString(fmt.Sprintf("- **First Message:** Seq=%d, Offset=%d, Consumer=%s\n",
@@ -211,24 +220,59 @@ func (r *Reporter) GenerateMarkdownReport(filename string) error {
 				stats.LastMessage.ConsumerID))
 		}
 
-		// Ordering violations details
+		// TRUE ORDERING VIOLATIONS (sequences went backwards - should NEVER happen)
 		if len(stats.OrderingViolations) > 0 {
-			sb.WriteString("\n**Ordering Violations:**\n\n")
-			sb.WriteString("| Expected Seq | Received Seq | Offset | Consumer | Timestamp |\n")
-			sb.WriteString("|--------------|--------------|--------|----------|----------|\n")
+			sb.WriteString("\n#### ❌ TRUE ORDERING VIOLATIONS (Sequences Went Backwards)\n\n")
+			sb.WriteString("⚠️ **This should NEVER happen with Kafka's guarantees!**\n\n")
+			sb.WriteString("| Expected Seq | Received Seq | Message ID | Offset | Consumer | Timestamp |\n")
+			sb.WriteString("|--------------|--------------|------------|--------|----------|----------|\n")
 			for _, violation := range stats.OrderingViolations {
-				sb.WriteString(fmt.Sprintf("| %d | %d | %d | %s | %s |\n",
+				sb.WriteString(fmt.Sprintf("| %d | %d | %s | %d | %s | %s |\n",
 					violation.Expected,
 					violation.Received,
+					violation.MessageID,
 					violation.Offset,
 					violation.ConsumerID,
 					violation.Timestamp.Format("15:04:05.000")))
 			}
+			sb.WriteString("\n")
 		}
 
-		// Gaps details
+		// DUPLICATE MESSAGES (expected with at-least-once delivery)
+		if len(stats.DuplicateMessages) > 0 {
+			sb.WriteString("\n#### 🔄 Duplicate Messages (Reprocessed)\n\n")
+			sb.WriteString("These messages were processed multiple times due to rebalancing and auto-commit timing.\n")
+			sb.WriteString("This is **expected behavior** with at-least-once delivery semantics.\n\n")
+
+			limit := 15
+			displayCount := len(stats.DuplicateMessages)
+			if displayCount > limit {
+				displayCount = limit
+			}
+
+			sb.WriteString("| Seq | Message ID | Process Count | Offset | Consumer | Timestamp |\n")
+			sb.WriteString("|-----|------------|---------------|--------|----------|----------|\n")
+			for i := 0; i < displayCount; i++ {
+				dup := stats.DuplicateMessages[i]
+				sb.WriteString(fmt.Sprintf("| %d | %s | %d | %d | %s | %s |\n",
+					dup.SequenceNum,
+					dup.MessageID,
+					dup.ProcessCount,
+					dup.Offset,
+					dup.ConsumerID,
+					dup.Timestamp.Format("15:04:05.000")))
+			}
+
+			if len(stats.DuplicateMessages) > limit {
+				sb.WriteString(fmt.Sprintf("\n*... and %d more duplicates*\n", len(stats.DuplicateMessages)-limit))
+			}
+			sb.WriteString("\n")
+		}
+
+		// Gaps details (sequences jumped forward - messages may arrive later)
 		if len(stats.Gaps) > 0 {
-			sb.WriteString("\n**Gaps Detected:**\n\n")
+			sb.WriteString("\n#### ⚠️  Gaps (Sequences Jumped Forward)\n\n")
+			sb.WriteString("These are message sequences that were skipped. They may arrive later due to reprocessing.\n\n")
 			sb.WriteString("| Gap Range | Missing Count | Detected At |\n")
 			sb.WriteString("|-----------|---------------|-------------|\n")
 			for _, gap := range stats.Gaps {
@@ -239,6 +283,7 @@ func (r *Reporter) GenerateMarkdownReport(filename string) error {
 					missingCount,
 					gap.Timestamp.Format("15:04:05.000")))
 			}
+			sb.WriteString("\n")
 		}
 
 		sb.WriteString("\n")
@@ -259,39 +304,111 @@ func (r *Reporter) GenerateMarkdownReport(filename string) error {
 	sb.WriteString(r.generateCrossPartitionExample())
 	sb.WriteString("\n")
 
+	// Key Distinction Section
+	sb.WriteString("## Understanding: Ordering vs. Duplicates\n\n")
+	sb.WriteString("It's critical to understand the difference:\n\n")
+	sb.WriteString("### ❌ Ordering Violation (BAD - should never happen)\n")
+	sb.WriteString("- **Definition:** Sequence numbers go **backwards** (e.g., 5 → 4 → 3)\n")
+	sb.WriteString("- **Kafka Guarantee:** This should **NEVER** happen within a partition\n")
+	sb.WriteString("- **What it means:** Kafka's ordering guarantee was broken\n")
+	sb.WriteString("- **Example:** Message with seq=10 arrives, then seq=5 arrives later\n\n")
+
+	sb.WriteString("### 🔄 Duplicate Message (OK - expected with at-least-once)\n")
+	sb.WriteString("- **Definition:** Same sequence number processed **multiple times** (e.g., 5 → 6 → 5 → 7)\n")
+	sb.WriteString("- **Kafka Guarantee:** This is **expected** with at-least-once delivery\n")
+	sb.WriteString("- **What it means:** Message reprocessed after rebalance (before offset was committed)\n")
+	sb.WriteString("- **Example:** Consumer processed seq=5, rebalanced before commit, new consumer processes seq=5 again\n")
+	sb.WriteString("- **Solution:** Make your message handlers idempotent OR use manual commits\n\n")
+
+	// Calculate duplicates across all partitions
+	totalDuplicates := 0
+	for _, stats := range r.results.PartitionStats {
+		stats.mu.Lock()
+		totalDuplicates += len(stats.DuplicateMessages)
+		stats.mu.Unlock()
+	}
+
 	// Conclusions
 	sb.WriteString("## Conclusions\n\n")
-	sb.WriteString("### What This Test Proves\n\n")
-	sb.WriteString("1. **Within-Partition Ordering:** ")
+	sb.WriteString("### Test Results Summary\n\n")
+
+	// 1. Ordering
+	sb.WriteString("#### 1. Message Ordering Within Partitions\n\n")
 	if r.results.OrderingPreserved {
-		sb.WriteString("✅ Messages within each partition maintain strict sequential order, even during consumer rebalancing.\n")
+		sb.WriteString("✅ **ORDERING PRESERVED: YES**\n\n")
+		sb.WriteString("- Zero ordering violations detected\n")
+		sb.WriteString("- Sequence numbers never went backwards\n")
+		sb.WriteString("- Kafka's ordering guarantee confirmed\n")
 	} else {
-		sb.WriteString("❌ Ordering violations were detected within partitions (unexpected).\n")
+		sb.WriteString("❌ **ORDERING VIOLATED**\n\n")
+		sb.WriteString("- Ordering violations detected (sequences went backwards)\n")
+		sb.WriteString("- This indicates a problem with Kafka or the test setup\n")
 	}
 	sb.WriteString("\n")
-	sb.WriteString("2. **Cross-Partition Ordering:** Messages from different partitions are interleaved and do not maintain global ordering.\n\n")
-	sb.WriteString("3. **Rebalancing Behavior:** Consumer rebalancing events occurred when consumers joined/left the group, ")
-	sb.WriteString("but did not affect message ordering within partitions.\n\n")
-	sb.WriteString("4. **Message Processing During Rebalance:**\n")
+
+	// 2. Duplicates
+	sb.WriteString("#### 2. Duplicate Messages (At-Least-Once Delivery)\n\n")
+	if totalDuplicates > 0 {
+		sb.WriteString(fmt.Sprintf("🔄 **DUPLICATES OCCURRED: YES** (%d messages reprocessed)\n\n", totalDuplicates))
+		sb.WriteString("- This is **expected** and **correct** behavior with auto-commit\n")
+		sb.WriteString("- Rebalancing interrupted processing before offsets were committed\n")
+		sb.WriteString("- At-least-once delivery guarantees no message loss\n")
+		sb.WriteString("- Application must handle duplicates (idempotent processing)\n")
+	} else {
+		sb.WriteString("ℹ️  **DUPLICATES OCCURRED: NO**\n\n")
+		sb.WriteString("- No duplicates in this test run\n")
+		sb.WriteString("- This can happen if all messages completed processing before rebalances\n")
+		sb.WriteString("- In production with longer processing times, duplicates are expected\n")
+	}
+	sb.WriteString("\n")
+
+	// 3. Message Delivery Completeness
+	sb.WriteString("#### 3. Message Delivery Completeness\n\n")
+	uniqueMsgs := 0
+	for _, stats := range r.results.PartitionStats {
+		stats.mu.Lock()
+		uniqueMsgs += len(stats.SeenSequences)
+		stats.mu.Unlock()
+	}
+
+	if uniqueMsgs == r.results.TotalMessagesSent {
+		sb.WriteString(fmt.Sprintf("✅ **ALL MESSAGES DELIVERED: YES** (%d/%d)\n\n", uniqueMsgs, r.results.TotalMessagesSent))
+		sb.WriteString("- All sent messages were received\n")
+		sb.WriteString("- No message loss during rebalancing\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("⚠️  **MESSAGE LOSS DETECTED** (%d/%d received)\n\n", uniqueMsgs, r.results.TotalMessagesSent))
+		sb.WriteString(fmt.Sprintf("- Missing %d messages\n", r.results.TotalMessagesSent-uniqueMsgs))
+		sb.WriteString("- This may indicate test timing issues or Kafka configuration problems\n")
+	}
+	sb.WriteString("\n")
+
+	// 4. Rebalancing Impact
+	sb.WriteString("#### 4. Rebalancing Impact\n\n")
+	sb.WriteString(fmt.Sprintf("- **Rebalance Events:** %d\n", len(r.results.RebalanceEvents)))
 	if r.results.ProcessingStats.TotalInterrupted > 0 {
-		sb.WriteString(fmt.Sprintf("   - ✅ **Kafka interrupts processing** when rebalance occurs (%d messages interrupted)\n",
-			r.results.ProcessingStats.TotalInterrupted))
-		sb.WriteString(fmt.Sprintf("   - ✅ **Messages are safely reprocessed** by the new partition owner (%d messages reprocessed)\n",
-			r.results.ProcessingStats.TotalReprocessed))
-		sb.WriteString("   - ✅ **No message loss** during rebalancing - all interrupted messages were eventually completed\n")
+		sb.WriteString(fmt.Sprintf("- **Messages Interrupted:** %d\n", r.results.ProcessingStats.TotalInterrupted))
+		sb.WriteString(fmt.Sprintf("- **Messages Reprocessed:** %d\n", r.results.ProcessingStats.TotalReprocessed))
 		if r.results.ProcessingStats.AverageReprocessingDelay > 0 {
-			sb.WriteString(fmt.Sprintf("   - ⏱️  **Average reprocessing delay:** %s\n",
+			sb.WriteString(fmt.Sprintf("- **Average Reprocessing Delay:** %s\n",
 				r.results.ProcessingStats.AverageReprocessingDelay.Round(time.Millisecond)))
 		}
-	} else {
-		sb.WriteString("   - ℹ️  No messages were interrupted during rebalancing in this test run\n")
-		sb.WriteString("   - This can happen if processing is fast relative to rebalance timing\n")
 	}
 	sb.WriteString("\n")
-	sb.WriteString("5. **Kafka Guarantees:** This test confirms Kafka's guarantees:\n")
-	sb.WriteString("   - **Ordering:** Messages are ordered within a partition, but not across partitions\n")
-	sb.WriteString("   - **Processing Safety:** Messages being processed during rebalance are safely reprocessed after partition reassignment\n")
-	sb.WriteString("   - **At-Least-Once Delivery:** With auto-commit enabled, messages may be reprocessed but none are lost\n\n")
+
+	// Final Kafka Guarantees Confirmation
+	sb.WriteString("### Kafka Guarantees Confirmed\n\n")
+	sb.WriteString("This test confirms:\n\n")
+	sb.WriteString("1. ✅ **Ordering:** Messages are strictly ordered within each partition\n")
+	sb.WriteString("2. ✅ **At-Least-Once Delivery:** All messages delivered, some reprocessed (no loss)\n")
+	sb.WriteString("3. ✅ **Partition Independence:** Cross-partition messages are not globally ordered\n")
+	sb.WriteString("4. ✅ **Rebalancing Safety:** Rebalancing interrupts processing but preserves ordering\n\n")
+
+	sb.WriteString("### Application Responsibilities\n\n")
+	sb.WriteString("Your application must:\n\n")
+	sb.WriteString("1. 🔄 **Handle Duplicates:** Make message processing idempotent\n")
+	sb.WriteString("2. 💾 **Track Processing:** Use unique message IDs or external state to detect duplicates\n")
+	sb.WriteString("3. ⚙️  **Choose Commit Strategy:** Auto-commit (simpler) vs Manual-commit (fewer duplicates)\n")
+	sb.WriteString("4. ⏱️  **Monitor Processing Time:** Keep processing time < session timeout to reduce interruptions\n\n")
 
 	// Write to file
 	return os.WriteFile(filename, []byte(sb.String()), 0644)

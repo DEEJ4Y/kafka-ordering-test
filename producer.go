@@ -58,7 +58,7 @@ func NewProducer(config TestConfig, logger *log.Logger) (*Producer, error) {
 }
 
 // ProduceMessages sends numbered messages to all partitions
-func (p *Producer) ProduceMessages() error {
+func (p *Producer) ProduceMessages() (int, error) {
 	p.logger.Printf("Starting to produce %d messages to topic '%s' with %d partitions",
 		p.config.NumMessages, p.config.TopicName, p.config.NumPartitions)
 
@@ -67,6 +67,9 @@ func (p *Producer) ProduceMessages() error {
 	for i := 0; i < p.config.NumPartitions; i++ {
 		sequenceNums[int32(i)] = 0
 	}
+
+	successCount := 0
+	errorCount := 0
 
 	// Send messages in round-robin fashion across partitions
 	for i := 0; i < p.config.NumMessages; i++ {
@@ -87,6 +90,7 @@ func (p *Producer) ProduceMessages() error {
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
 			p.logger.Printf("ERROR: Failed to marshal message: %v", err)
+			errorCount++
 			continue
 		}
 
@@ -102,9 +106,11 @@ func (p *Producer) ProduceMessages() error {
 		partition, offset, err := p.producer.SendMessage(kafkaMsg)
 		if err != nil {
 			p.logger.Printf("ERROR: Failed to send message %s: %v", msg.MessageID, err)
+			errorCount++
 			continue
 		}
 
+		successCount++
 		p.logger.Printf("PRODUCED: Partition=%d, Offset=%d, Key=%s, Seq=%d, MsgID=%s",
 			partition, offset, msg.PartitionKey, msg.SequenceNum, msg.MessageID)
 
@@ -114,12 +120,18 @@ func (p *Producer) ProduceMessages() error {
 		}
 	}
 
-	p.logger.Printf("Finished producing messages. Total sent: %d", p.config.NumMessages)
+	p.logger.Printf("Finished producing messages.")
+	p.logger.Printf("  Successfully sent: %d messages", successCount)
+	p.logger.Printf("  Failed: %d messages", errorCount)
 	for partition, seq := range sequenceNums {
 		p.logger.Printf("  Partition %d: %d messages (seq 0-%d)", partition, seq, seq-1)
 	}
 
-	return nil
+	if errorCount > 0 {
+		return successCount, fmt.Errorf("failed to send %d messages", errorCount)
+	}
+
+	return successCount, nil
 }
 
 // Close closes the producer

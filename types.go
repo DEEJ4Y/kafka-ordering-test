@@ -33,24 +33,36 @@ type RebalanceEvent struct {
 
 // PartitionStats tracks statistics for a single partition
 type PartitionStats struct {
-	PartitionID       int32
-	MessagesReceived  int
-	ExpectedSequence  int
-	OrderingViolations []OrderingViolation
-	Duplicates        []int
-	Gaps              []Gap
-	FirstMessage      *ConsumedMessage
-	LastMessage       *ConsumedMessage
-	mu                sync.Mutex
+	PartitionID         int32
+	MessagesReceived    int
+	ExpectedSequence    int
+	OrderingViolations  []OrderingViolation
+	DuplicateMessages   []DuplicateMessage
+	Gaps                []Gap
+	FirstMessage        *ConsumedMessage
+	LastMessage         *ConsumedMessage
+	SeenSequences       map[int]int // sequence -> count
+	mu                  sync.Mutex
 }
 
-// OrderingViolation represents an out-of-order message
+// OrderingViolation represents a true out-of-order message (sequence went backwards)
 type OrderingViolation struct {
 	Expected       int
 	Received       int
 	Offset         int64
 	Timestamp      time.Time
 	ConsumerID     string
+	MessageID      string
+}
+
+// DuplicateMessage represents a message that was processed multiple times
+type DuplicateMessage struct {
+	SequenceNum    int
+	MessageID      string
+	Offset         int64
+	Timestamp      time.Time
+	ConsumerID     string
+	ProcessCount   int // How many times this sequence was seen
 }
 
 // Gap represents a gap in message sequence
@@ -155,8 +167,9 @@ func (tr *TestResults) GetPartitionStats(partition int32) *PartitionStats {
 		tr.PartitionStats[partition] = &PartitionStats{
 			PartitionID:        partition,
 			OrderingViolations: make([]OrderingViolation, 0),
-			Duplicates:         make([]int, 0),
+			DuplicateMessages:  make([]DuplicateMessage, 0),
 			Gaps:               make([]Gap, 0),
+			SeenSequences:      make(map[int]int),
 		}
 	}
 	return tr.PartitionStats[partition]

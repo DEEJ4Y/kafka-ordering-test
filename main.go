@@ -67,8 +67,31 @@ func main() {
 	// Create verifier
 	verifier := NewOrderVerifier(results, logger)
 
-	// Phase 1: Start 2 consumers
-	logger.Println("\n=== PHASE 1: Starting 2 consumers ===")
+	// ========================================================================
+	// PHASE 1: Produce ALL messages FIRST (before any consumers)
+	// ========================================================================
+	logger.Println("\n=== PHASE 1: Producing all messages (consumers not started yet) ===")
+	producer, err := NewProducer(config, logger)
+	if err != nil {
+		logger.Fatalf("Failed to create producer: %v", err)
+	}
+
+	messagesSent, err := producer.ProduceMessages()
+	if err != nil {
+		logger.Printf("WARNING: Producer encountered errors: %v", err)
+	}
+	producer.Close()
+
+	results.TotalMessagesSent = messagesSent
+	logger.Printf("✓ Producer complete! Successfully sent %d/%d messages\n", messagesSent, numMessages)
+
+	// Wait for messages to be fully written to Kafka
+	time.Sleep(2 * time.Second)
+
+	// ========================================================================
+	// PHASE 2: Start 2 consumers and let them begin processing
+	// ========================================================================
+	logger.Println("\n=== PHASE 2: Starting 2 consumers ===")
 	consumers := make([]*Consumer, 0)
 	var wg sync.WaitGroup
 
@@ -82,34 +105,21 @@ func main() {
 
 		wg.Add(1)
 		go consumer.Start(&wg)
-		time.Sleep(1 * time.Second) // Stagger consumer starts
+		time.Sleep(1 * time.Second)
 	}
 
-	// Wait for consumers to be ready
+	// Wait for consumers to be ready and start processing
 	time.Sleep(3 * time.Second)
 
-	// Phase 2: Start producer
-	logger.Println("\n=== PHASE 2: Starting message production ===")
-	producer, err := NewProducer(config, logger)
-	if err != nil {
-		logger.Fatalf("Failed to create producer: %v", err)
-	}
+	// ========================================================================
+	// PHASE 3: Add 3rd consumer after ~25% of messages processed
+	// ========================================================================
+	logger.Println("\n=== PHASE 3: Letting consumers process (~25% of messages) ===")
+	// With 600 messages and 50-200ms processing, expect ~10-40 seconds total
+	// Wait for ~25% = 2-10 seconds
+	time.Sleep(5 * time.Second)
 
-	// Start producing in background
-	producerDone := make(chan bool)
-	go func() {
-		if err := producer.ProduceMessages(); err != nil {
-			logger.Printf("Producer error: %v", err)
-		}
-		results.TotalMessagesSent = numMessages
-		producerDone <- true
-	}()
-
-	// Wait a bit for some messages to be produced
-	time.Sleep(2 * time.Second)
-
-	// Phase 3: Add 3rd consumer (trigger rebalance)
-	logger.Println("\n=== PHASE 3: Adding 3rd consumer (triggering rebalance) ===")
+	logger.Println("\n=== PHASE 3b: Adding 3rd consumer (triggering rebalance) ===")
 	consumerID := "consumer-2"
 	consumer, err := NewConsumer(consumerID, config, logger, results, verifier)
 	if err != nil {
@@ -121,8 +131,13 @@ func main() {
 	go consumer.Start(&wg)
 	time.Sleep(3 * time.Second)
 
-	// Phase 4: Add 4th consumer (more consumers than partitions)
-	logger.Println("\n=== PHASE 4: Adding 4th consumer (more consumers than partitions) ===")
+	// ========================================================================
+	// PHASE 4: Add 4th consumer after ~50% of messages processed
+	// ========================================================================
+	logger.Println("\n=== PHASE 4: Letting consumers process more (~50% total) ===")
+	time.Sleep(5 * time.Second)
+
+	logger.Println("\n=== PHASE 4b: Adding 4th consumer (more consumers than partitions) ===")
 	consumerID = "consumer-3"
 	consumer, err = NewConsumer(consumerID, config, logger, results, verifier)
 	if err != nil {
@@ -134,17 +149,19 @@ func main() {
 	go consumer.Start(&wg)
 	time.Sleep(3 * time.Second)
 
-	// Wait for producer to finish
-	logger.Println("\n=== Waiting for producer to finish ===")
-	<-producerDone
-	producer.Close()
-	logger.Println("Producer finished!")
+	// ========================================================================
+	// PHASE 5: Let all consumers process remaining messages
+	// ========================================================================
+	logger.Println("\n=== PHASE 5: Letting all consumers process remaining messages ===")
+	// With 600 messages, 3 partitions, 4 consumers (one idle), ~200 msgs per active consumer
+	// At 50-200ms per message: 10-40 seconds worst case
+	// Wait generously to ensure all messages are processed
+	logger.Println("Waiting 30 seconds for complete processing...")
+	time.Sleep(30 * time.Second)
 
-	// Phase 5: Let consumers catch up
-	logger.Println("\n=== PHASE 5: Letting consumers catch up ===")
-	time.Sleep(5 * time.Second)
-
-	// Phase 6: Remove consumers (trigger rebalances)
+	// ========================================================================
+	// PHASE 6: Remove consumers (trigger rebalances) while there's little/no work
+	// ========================================================================
 	logger.Println("\n=== PHASE 6: Removing consumers (triggering rebalances) ===")
 
 	// Remove consumer 3
@@ -157,9 +174,12 @@ func main() {
 	consumers[2].Stop()
 	time.Sleep(3 * time.Second)
 
-	// Let remaining consumers process
-	logger.Println("\n=== Waiting for final message processing ===")
-	time.Sleep(5 * time.Second)
+	// ========================================================================
+	// PHASE 7: Final processing and verification
+	// ========================================================================
+	logger.Println("\n=== PHASE 7: Final processing by remaining consumers ===")
+	// Give final consumers time to pick up any remaining uncommitted messages
+	time.Sleep(10 * time.Second)
 
 	// Stop remaining consumers
 	logger.Println("\n=== Stopping all consumers ===")
