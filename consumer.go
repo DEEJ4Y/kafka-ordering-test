@@ -129,7 +129,7 @@ func (h *consumerGroupHandler) Setup(session sarama.ConsumerGroupSession) error 
 	partitions := session.Claims()[h.consumer.config.TopicName]
 
 	h.consumer.logger.Printf("[%s] REBALANCE: SETUP - Assigned partitions: %v (Generation: %d)",
-		h.consumer.consumerID, partitions, session.GenerationId())
+		h.consumer.consumerID, partitions, session.GenerationID())
 
 	// Record rebalance event
 	event := RebalanceEvent{
@@ -155,7 +155,7 @@ func (h *consumerGroupHandler) Cleanup(session sarama.ConsumerGroupSession) erro
 	partitions := session.Claims()[h.consumer.config.TopicName]
 
 	h.consumer.logger.Printf("[%s] REBALANCE: CLEANUP - Revoking partitions: %v (Generation: %d)",
-		h.consumer.consumerID, partitions, session.GenerationId())
+		h.consumer.consumerID, partitions, session.GenerationID())
 
 	// Record rebalance event
 	event := RebalanceEvent{

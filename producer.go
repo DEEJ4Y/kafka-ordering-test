@@ -23,6 +23,7 @@ func NewProducer(config TestConfig, logger *log.Logger) (*Producer, error) {
 
 	// CRITICAL: Enable idempotence to prevent duplicates and ensure ordering
 	saramaConfig.Producer.Idempotent = true
+	saramaConfig.Net.MaxOpenRequests = 1
 
 	// CRITICAL: Max in-flight requests = 1 ensures strict ordering within partition
 	// Setting this to 5 would allow out-of-order messages in case of retries
